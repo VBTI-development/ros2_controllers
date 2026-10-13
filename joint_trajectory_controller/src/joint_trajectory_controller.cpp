@@ -14,6 +14,7 @@
 
 #include "joint_trajectory_controller/joint_trajectory_controller.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -55,6 +56,19 @@ auto interface_has_values = [](const auto & joint_interface) -> bool
              return !interface_op.has_value() || !std::isfinite(interface_op.value());
            }) == joint_interface.end();
 };
+
+namespace
+{
+// true if every point has a position for every joint named in the message. fill_partial_goal
+// leaves a point short when a joint omitted from the goal has no position to hold at.
+bool every_point_has_all_positions(const trajectory_msgs::msg::JointTrajectory & trajectory_msg)
+{
+  const auto num_joints = trajectory_msg.joint_names.size();
+  return std::all_of(
+    trajectory_msg.points.begin(), trajectory_msg.points.end(), [num_joints](const auto & point)
+    { return point.positions.empty() || point.positions.size() == num_joints; });
+}
+}  // namespace
 
 JointTrajectoryController::JointTrajectoryController()
 : controller_interface::ControllerInterface(), dof_(0), num_cmd_joints_(0)
@@ -277,7 +291,8 @@ controller_interface::return_type JointTrajectoryController::update(
   if (
     current_trajectory_msg != *new_external_msg && (rt_has_pending_goal_ && !active_goal) == false)
   {
-    if (fill_partial_goal(*new_external_msg))
+    fill_partial_goal(*new_external_msg);
+    if (every_point_has_all_positions(**new_external_msg))
     {
       sort_to_local_joint_order(*new_external_msg);
       // TODO(denis): Add here integration of position and velocity
@@ -1544,17 +1559,16 @@ void JointTrajectoryController::compute_error_for_joint(
   }
 }
 
-bool JointTrajectoryController::fill_partial_goal(
+void JointTrajectoryController::fill_partial_goal(
   std::shared_ptr<trajectory_msgs::msg::JointTrajectory> trajectory_msg) const
 {
   // joint names in the goal are a subset of existing joints, as checked in goal_callback
   // so if the size matches, the goal contains all controller joints
   if (dof_ == trajectory_msg->joint_names.size())
   {
-    return true;
+    return;
   }
 
-  bool every_omitted_joint_has_a_position = true;
   trajectory_msg->joint_names.reserve(dof_);
 
   for (size_t index = 0; index < dof_; ++index)
@@ -1592,11 +1606,9 @@ bool JointTrajectoryController::fill_partial_goal(
         // Assume hold position with 0 velocity and acceleration for missing joints
         if (!it.positions.empty())
         {
-          if (std::isnan(omitted_joint_hold))
-          {
-            every_omitted_joint_has_a_position = false;
-          }
-          else
+          // No position to hold at: push nothing, leaving the point short. update() rejects a
+          // trajectory with short points rather than executing it.
+          if (!std::isnan(omitted_joint_hold))
           {
             it.positions.push_back(omitted_joint_hold);
           }
@@ -1616,7 +1628,6 @@ bool JointTrajectoryController::fill_partial_goal(
       }
     }
   }
-  return every_omitted_joint_has_a_position;
 }
 
 void JointTrajectoryController::sort_to_local_joint_order(
