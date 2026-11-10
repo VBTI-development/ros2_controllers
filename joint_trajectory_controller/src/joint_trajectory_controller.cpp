@@ -282,7 +282,13 @@ controller_interface::return_type JointTrajectoryController::update(
   }
 
   // don't update goal after we sampled the trajectory to avoid any racecondition
-  const auto active_goal = *rt_active_goal_.readFromRT();
+  auto active_goal = *rt_active_goal_.readFromRT();
+
+  // current state update, before the new message: filling its omitted joints and the hold on
+  // rejecting it both need this cycle's state
+  state_current_.time_from_start.sec = 0;
+  state_current_.time_from_start.nanosec = 0;
+  read_state_from_state_interfaces(state_current_);
 
   // Check if a new trajectory message has been received from Non-RT threads
   const auto current_trajectory_msg = current_trajectory_->get_trajectory_msg();
@@ -317,16 +323,17 @@ controller_interface::return_type JointTrajectoryController::update(
         // See https://github.com/ros-controls/ros2_controllers/issues/168
         rt_active_goal_.writeFromNonRT(RealtimeGoalHandlePtr());
         rt_has_pending_goal_ = false;
+        // the goal is finished: the rest of this cycle must not send it feedback or complete it
+        active_goal.reset();
       }
+      // Hold from this cycle on, so the previous trajectory commands nothing more. The hold also
+      // replaces the pending message, else the rejected one is picked up again next cycle.
+      const auto hold_msg = set_hold_position();
+      current_trajectory_->update(hold_msg);
       new_trajectory_msg_.reset();
-      new_trajectory_msg_.initRT(set_hold_position());
+      new_trajectory_msg_.initRT(hold_msg);
     }
   }
-
-  // current state update
-  state_current_.time_from_start.sec = 0;
-  state_current_.time_from_start.nanosec = 0;
-  read_state_from_state_interfaces(state_current_);
 
   // currently carrying out a trajectory
   if (has_active_trajectory())
